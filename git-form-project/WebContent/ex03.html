@@ -1,0 +1,2043 @@
+/*
+
+	Rikaikun
+	Copyright (C) 2010 Erek Speed
+	http://code.google.com/p/rikaikun/
+	
+	---
+
+	Originally based on naver_dic 1.07
+	by Jonathan Zarate
+	http://www.polarcloud.com/
+
+	---
+
+	Originally based on RikaiXUL 0.4 by Todd Rudick
+	http://www.rikai.com/
+	http://rikaixul.mozdev.org/
+
+	---
+
+	This program is free software; you can redistribute it and/or modify
+	it under the terms of the GNU General Public License as published by
+	the Free Software Foundation; either version 2 of the License, or
+	(at your option) any later version.
+
+	This program is distributed in the hope that it will be useful,
+	but WITHOUT ANY WARRANTY; without even the implied warranty of
+	MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+	GNU General Public License for more details.
+
+	You should have received a copy of the GNU General Public License
+	along with this program; if not, write to the Free Software
+	Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA  02110-1301  USA
+
+	---
+
+	Please do not change or remove any of the copyrights or links to web pages
+	when modifying any of the files. - Jon
+
+*/
+
+var rcxContent = {
+  dictCount: 3,
+  altView: 0,
+
+  sameDict: 0,
+  forceKanji: 0,
+  defaultDict: 2,
+  nextDict: 3,
+  autoSelect: false,
+  rightClkEvent: null,
+  naver_chrome_validClick: false,
+
+  //Adds the listeners and stuff.
+  enableTab: function() {
+    if (window.naver_dic == null) {
+      window.naver_dic = {};
+      window.addEventListener('mousemove', this.onMouseMove, false);
+      window.addEventListener('keydown', this.onKeyDown, true);
+      window.addEventListener('keyup', this.onKeyUp, true);
+      window.addEventListener('mousedown', this.onMouseDown, false);
+      window.addEventListener('mouseup', this.onMouseUp, false);
+
+      var port = chrome.runtime.connect();
+
+      window.addEventListener('message', rcxContent.receiveMessage, false);
+
+      var audio = $(
+        '<audio src="" id="naver_dic_audio_controller" controls="controls"/>'
+      );
+      audio.css('display', 'none');
+      audio[0].onended = function() {
+        var lastSong = $(this).attr('src');
+        if (window.pronundata && lastSong) {
+          var songIndex = window.pronundata.indexOf(lastSong);
+          if (songIndex >= 0 && songIndex + 1 < window.pronundata.length) {
+            setTimeout(function() {
+              var audio = $('#naver_dic_audio_controller');
+              audio.attr('src', window.pronundata[songIndex + 1]);
+              var audioElement = document.getElementById(
+                'naver_dic_audio_controller'
+              );
+              if (audioElement) {
+                audioElement.play();
+              }
+            }, 500);
+          }
+        }
+      };
+      $('html').append(audio);
+
+      chrome.storage.local.get('general', function(items) {
+        var generalOpt = {};
+        $.extend(true, generalOpt, items);
+        if (generalOpt.general.quickClickSearch) {
+          rcxContent.naver_chrome_validClick = true;
+        }
+      });
+    }
+  },
+
+  //Removes the listeners and stuff
+  disableTab: function() {
+    if (window.naver_dic != null) {
+      var e;
+      window.removeEventListener('mousemove', this.onMouseMove, false);
+      window.removeEventListener('keydown', this.onKeyDown, true);
+      window.removeEventListener('keyup', this.onKeyUp, true);
+      window.removeEventListener('mosuedown', this.onMouseDown, false);
+      window.removeEventListener('mouseup', this.onMouseUp, false);
+
+      var audio = $('#naver_dic_audio_controller');
+      audio.remove();
+
+      e = document.getElementById('naver_dic-css');
+      if (e) e.parentNode.removeChild(e);
+      e = document.getElementById('naver_dic-window');
+      if (e) e.parentNode.removeChild(e);
+
+      this.clearHi();
+      delete window.naver_dic;
+    }
+  },
+
+  setAutoSelect: function(isEnable, defaultDict) {
+    rcxContent.autoSelect = isEnable;
+    rcxContent.defaultDict = defaultDict;
+  },
+
+  receiveMessage: function(event) {
+    // We only accept messages from ourselves
+    if (event.source != window) return;
+
+    if (event.data.type && event.data.type == 'FROM_PAGE') {
+      entry = window.transferdata;
+      if (event.data.method == 'open') {
+        window.naver_dic.dispatcherTimer = setTimeout(function() {
+          rcxContent.showWindow(window.transferdata);
+        }, 1);
+      } else if (event.data.method == 'copy') {
+        tocopy = entry.entryName + ' : ';
+        if (entry.mean && entry.mean.length) {
+          for (var i = 0; i < entry.mean.length; i++) {
+            tocopy += entry.mean[i] + '; ';
+          }
+
+          tocopy = tocopy.substring(0, tocopy.length - 2);
+        }
+
+        chrome.extension.sendMessage({
+          dictRequestType: dictRequestType.copytext,
+          text: tocopy
+        });
+
+        rcxContent.clearHi();
+        rcxContent.hidePopup();
+
+        $.alerts.okButton = '&nbsp;확인&nbsp;';
+        var alertContent = rcxContent.isMac()
+          ? '단어가 복사되었습니다.<br>원하는 곳에 붙여넣기 (Command + V) 하세요.'
+          : '단어가 복사되었습니다.<br>원하는 곳에 붙여넣기 (Ctrl + V) 하세요.';
+        jAlert(alertContent, '툴팁사전 안내');
+      } else if (event.data.method == 'pronun') {
+        if (!window.pronundata) {
+          var pronunPrama;
+          if (entry.pronunFile && entry.pronunFile.length) {
+            var pronunPrama = entry.pronunFile;
+          } else if (entry.pronunciation && entry.pronunciation.length) {
+            var pronunPrama = entry.pronunciation;
+          }
+
+          if (pronunPrama) {
+            url =
+              dic_query_url +
+              $.param({
+                mode: 'sound',
+                wordString: pronunPrama.join(','),
+                languageCode: window.transferlanguage
+              });
+            $.get(url, function(data) {
+              jdata = JSON.parse(data);
+              if (jdata && jdata.length) {
+                window.pronundata = jdata;
+                var audio = $('#naver_dic_audio_controller');
+                audio.attr('src', window.pronundata[0]);
+                var audioElement = document.getElementById(
+                  'naver_dic_audio_controller'
+                );
+                if (audioElement) {
+                  audioElement.play();
+                }
+              }
+            });
+          }
+        } else {
+          var audio = $('#naver_dic_audio_controller');
+          audio.attr('src', window.pronundata[0]);
+          var audioElement = document.getElementById(
+            'naver_dic_audio_controller'
+          );
+          if (audioElement) {
+            audioElement.play();
+          }
+        }
+      }
+    }
+  },
+
+  isMac: function() {
+    return navigator.userAgent.toLowerCase().indexOf('mac') > 0;
+  },
+
+  showWindow: function(transferdata) {
+    if (window.naver_dic.dispatcherTimer) {
+      clearTimeout(window.naver_dic.dispatcherTimer);
+    }
+
+    rcxContent.clearHi();
+    rcxContent.hidePopup();
+
+    var url = '';
+    if (transferdata.pinyin && transferdata.pinyin.length) {
+      url =
+        'https://zh.dict.naver.com/mini/search/all?q=' + transferdata.entryName;
+    } else if (
+      transferdata.dicType == 'hanja' ||
+      transferdata.dicType == 'hirakana'
+    ) {
+      url =
+        'https://ja.dict.naver.com/search.nhn?m=mini&query=' +
+        transferdata.entryName;
+    } else {
+      url =
+        'https://endic.naver.com/popManager.nhn?sLn=kr&m=search&query=' +
+        transferdata.entryName;
+    }
+
+    var width = 420;
+    var height = 550;
+    wholeWidth = screen.availLeft + screen.availWidth;
+    wholeHeight = screen.availTop + screen.availHeight;
+    windowRight = wholeWidth - window.top.screenX - window.top.outerWidth;
+    var extendheight = window.top.outerHeight - window.top.innerHeight;
+    var top = window.top.screenY + extendheight;
+    var left = wholeWidth - windowRight - width;
+
+    chrome.extension.sendMessage({
+      dictRequestType: dictRequestType.showWindow,
+      url: url,
+      width: width,
+      height: height,
+      top: top,
+      left: left
+    });
+    /*$.window({
+			title: "dic",
+			url: url,
+			x: -1,
+			y: 60,
+			width: 400,
+			height: 520
+		});*/
+  },
+
+  getContentType: function(tDoc) {
+    var m = tDoc.getElementsByTagName('meta');
+    for (var i in m) {
+      if (m[i].httpEquiv == 'Content-Type') {
+        var con = m[i].content;
+        con = con.split(';');
+        return con[0];
+      }
+    }
+    return null;
+  },
+
+  showPopup: function(text, elem, x, y, looseWidth) {
+    topdoc = window.document;
+
+    if (isNaN(x) || isNaN(y)) x = y = 0;
+
+    var popup = topdoc.getElementById('naver_dic-window');
+    if (!popup) {
+      popup = topdoc.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+      popup.setAttribute('id', 'naver_dic-window');
+      topdoc.documentElement.appendChild(popup);
+
+      popup.addEventListener(
+        'dblclick',
+        function(ev) {
+          rcxContent.hidePopup();
+          ev.stopPropagation();
+        },
+        true
+      );
+
+      /* if (this.cfg.resizedoc) {
+				if ((topdoc.body.clientHeight < 1024) && (topdoc.body.style.minHeight == '')) {
+					topdoc.body.style.minHeight = '1024px';
+					topdoc.body.style.overflow = 'auto';
+				}
+			} */
+    }
+
+    popup.style.width = 'auto';
+    popup.style.height = 'auto';
+    popup.style.maxWidth = looseWidth ? '' : '600px';
+
+    if (rcxContent.getContentType(topdoc) == 'text/plain') {
+      var df = document.createDocumentFragment();
+      df.appendChild(
+        document.createElementNS('http://www.w3.org/1999/xhtml', 'span')
+      );
+      df.firstChild.innerHTML = text;
+
+      while (popup.firstChild) {
+        popup.removeChild(popup.firstChild);
+      }
+      popup.appendChild(df.firstChild);
+    } else {
+      popup.innerHTML = text;
+    }
+
+    if (elem) {
+      popup.style.top = '-1000px';
+      popup.style.left = '0px';
+      popup.style.display = '';
+
+      bbo = window;
+      var pW = popup.offsetWidth;
+      var pH = popup.offsetHeight;
+
+      // guess!
+      if (pW <= 0) pW = 200;
+      if (pH <= 0) {
+        pH = 0;
+        var j = 0;
+        while ((j = text.indexOf('<br/>', j)) != -1) {
+          j += 5;
+          pH += 22;
+        }
+        pH += 25;
+      }
+
+      if (this.altView == 1) {
+        x = window.scrollX;
+        y = window.scrollY;
+      } else if (this.altView == 2) {
+        x = window.innerWidth - (pW + 20) + window.scrollX;
+        y = window.innerHeight - (pH + 20) + window.scrollY;
+      }
+      // FIXME: This probably doesn't actually work
+      else if (elem instanceof window.HTMLOptionElement) {
+        // these things are always on z-top, so go sideways
+
+        x = 0;
+        y = 0;
+
+        var p = elem;
+        while (p) {
+          x += p.offsetLeft;
+          y += p.offsetTop;
+          p = p.offsetParent;
+        }
+        if (elem.offsetTop > elem.parentNode.clientHeight) y -= elem.offsetTop;
+
+        if (x + popup.offsetWidth > window.innerWidth) {
+          // too much to the right, go left
+          x -= popup.offsetWidth + 5;
+          if (x < 0) x = 0;
+        } else {
+          // use SELECT's width
+          x += elem.parentNode.offsetWidth + 5;
+        }
+
+        /*
+				// in some cases (ex: google.co.jp), ebo doesn't add the width of the scroller (?), so use SELECT's width
+				const epbo = elem.ownerDocument.getBoxObjectFor(elem.parentNode);
+
+				const ebo = elem.ownerDocument.getBoxObjectFor(elem);
+				x = ebo.screenX - bbo.screenX;
+				y = ebo.screenY - bbo.screenY;
+
+				if (x > (window.innerWidth - (x + epbo.width))) {
+					x = (x - popup.offsetWidth - 5);
+					if (x < 0) x = 0;
+				}
+				else {
+					x += epbo.width + 5;
+				}
+*/
+      } else {
+        //x -= bbo.screenX;
+        //y -= bbo.screenY;
+
+        // go left if necessary
+        if (x + pW > window.innerWidth - 20) {
+          //x = (window.innerWidth - pW) - 20;
+          x = x - pW;
+          if (x < 0) x = 0;
+        }
+
+        // below the mouse
+        //var v = 25;
+        var v = 5;
+
+        // under the popup title
+        if (elem.title && elem.title != '') v += 20;
+
+        // go up if necessary
+        if (y + v + pH > window.innerHeight) {
+          //var t = y - pH - 30;
+          var t = y - pH - v;
+          if (t >= 0) y = t;
+        } else y += v;
+
+        x += window.scrollX;
+        y += window.scrollY;
+      }
+    } else {
+      x += window.scrollX;
+      y += window.scrollY;
+    }
+
+    popup.style.left = x + 'px';
+    popup.style.top = y + 'px';
+    popup.style.display = '';
+  },
+
+  hidePopup: function() {
+    var audio = $('#naver_dic_audio_controller');
+    if (audio) {
+      audio.attr('src', '');
+      audio.stop();
+    }
+    var popup = document.getElementById('naver_dic-window');
+    if (popup) {
+      popup.style.display = 'none';
+      popup.innerHTML = '';
+    }
+    this.title = null;
+  },
+
+  isVisible: function() {
+    var popup = document.getElementById('naver_dic-window');
+    return popup && popup.style.display != 'none';
+  },
+
+  clearHi: function() {
+    var tdata = window.naver_dic;
+    if (!tdata || !tdata.prevSelView) return;
+    if (tdata.prevSelView.closed) {
+      tdata.prevSelView = null;
+      return;
+    }
+
+    var sel = tdata.prevSelView.getSelection();
+    // If there is an empty selection or the selection was done by
+    // rikaikun then we'll clear it
+    if (!sel.toString() || tdata.selText == sel.toString()) {
+      // In the case of no selection we clear the oldTA
+      // The reason for this is becasue if there's no selection
+      // we probably clicked somewhere else and we don't want to
+      // bounce back.
+      if (!sel.toString()) tdata.oldTA = null;
+
+      // clear all selections
+      sel.removeAllRanges();
+      //Text area stuff
+      // If oldTA is still around that means we had a highlighted region
+      // which we just cleared and now we're going to jump back to where we were
+      // the cursor was before our lookup
+      // if oldCaret is less than 0 it means we clicked outside the box and shouldn't
+      // come back
+      if (tdata.oldTA && tdata.oldCaret >= 0) {
+        tdata.oldTA.selectionStart = tdata.oldTA.selectionEnd = tdata.oldCaret;
+      }
+    }
+    tdata.prevSelView = null;
+    tdata.kanjiChar = null;
+    tdata.selText = null;
+  },
+
+  lastFound: null,
+
+  configPage: function() {
+    window.openDialog(
+      'chrome://naver_dic/content/prefs.xul',
+      '',
+      'chrome,centerscreen'
+    );
+  },
+
+  keysDown: [],
+
+  onKeyDown: function(ev) {
+    rcxContent._onKeyDown(ev);
+  },
+  _onKeyDown: function(ev) {
+    this.keysDown[ev.keyCode] = 1;
+  },
+
+  mDown: false,
+
+  onMouseDown: function(ev) {
+    if (ev.button == 0) {
+      if (rcxContent.naver_chrome_validClick === true && ev.altKey) {
+        rcxContent.rightClkEvent = ev;
+        rcxContent.onShowPopByAlt();
+      } else {
+        rcxContent._onMouseDown(ev);
+      }
+    }
+    //right click
+    else if (ev.button == 2) rcxContent.rightClkEvent = ev;
+  },
+
+  onShowPopByAlt: function() {
+    if (!rcxContent.rightClkEvent) return;
+    rcxContent._onMouseDown(rcxContent.rightClkEvent, true);
+    rcxContent.rightClkEvent = null;
+  },
+
+  onShowPopByRightMenu: function(entryName, defaultDict) {
+    if (!rcxContent.rightClkEvent) return;
+    //var url = "http://endic.naver.com/popManager.nhn?sLn=en&m=search&searchOption=all&query=" + entryName;
+    var width = 420;
+    var height = 550;
+    wholeWidth = screen.availLeft + screen.availWidth;
+    wholeHeight = screen.availTop + screen.availHeight;
+    windowRight = wholeWidth - window.top.screenX - window.top.outerWidth;
+    var extendheight = window.top.outerHeight - window.top.innerHeight;
+    var top = window.top.screenY + extendheight;
+    var left = wholeWidth - windowRight - width;
+
+    var u;
+    var ro = 0;
+    while ((u = entryName.charCodeAt(ro)) == 32 || u == 9 || u == 10) {
+      ++ro;
+      if (ro >= entryName.length) {
+        break;
+      }
+    }
+
+    var language = this.getLanguageType(u);
+    var url;
+    if (language == dictType.Chinese) {
+      url = 'https://zh.dict.naver.com/mini/search/all?q=' + entryName;
+    } else if (language == dictType.Japanese) {
+      url = 'https://ja.dict.naver.com/search.nhn?m=mini&query=' + entryName;
+    } else if (language == dictType.English) {
+      url =
+        'https://endic.naver.com/popManager.nhn?sLn=kr&m=search&query=' +
+        entryName;
+    } else {
+      switch (defaultDict) {
+        case 0:
+          url = 'https://endic.naver.com/popManager.nhn?sLn=kr&m=miniPopMain';
+          break;
+        case 1:
+          url = 'https://ko.dict.naver.com/small_index.nhn';
+          break;
+        case 2:
+          url = 'https://hanja.dict.naver.com/small.naver';
+          break;
+        case 3:
+          url = 'https://ja.dict.naver.com/?m=mini';
+          break;
+        case 4:
+          url = 'https://zh.dict.naver.com/mini/section';
+          break;
+        case 5:
+          url = 'https://dict.naver.com/frkodict/mini/main_mini.nhn';
+          break;
+      }
+    }
+
+    chrome.extension.sendMessage({
+      dictRequestType: dictRequestType.showWindow,
+      url: url,
+      width: width,
+      height: height,
+      top: top,
+      left: left
+    });
+  },
+
+  _onMouseDown: function(ev, forceShow) {
+    if (this.isVisible()) this.clearHi();
+    mDown = true;
+
+    var keys = Object.keys(rcxContent.keysDown);
+    var selectedkeys = [];
+    for (var i = 0; i < keys.length; i++) {
+      if (rcxContent.keysDown[keys[i]]) {
+        selectedkeys.push(keys[i]);
+      }
+    }
+
+    //only alt(code 18) is pressed now
+    if (
+      (selectedkeys.length == 1 && selectedkeys[0] == 180) ||
+      (typeof forceShow !== 'undefined' && forceShow)
+    ) {
+      var fake;
+      // Put this in a try catch so that an exception here doesn't prevent editing due to div.
+      try {
+        //don't hide popup when hover the pop window
+        cnode = ev.target;
+        while (cnode.id != 'naver_dic-window' && cnode.parentNode) {
+          cnode = cnode.parentNode;
+        }
+
+        if (cnode.id == 'naver_dic-window') {
+          return;
+        }
+
+        if (ev.target.nodeName == 'TEXTAREA' || ev.target.nodeName == 'INPUT') {
+          fake = rcxContent.makeFake(ev.target);
+          document.body.appendChild(fake);
+          fake.scrollTop = ev.target.scrollTop;
+          fake.scrollLeft = ev.target.scrollLeft;
+        }
+
+        var tdata = window.naver_dic; // per-tab data
+
+        var range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+        var rp = range.startContainer;
+        var ro = range.startOffset;
+
+        if (fake) {
+          // At the end of a line, don't do anything or you just get beginning of next line
+          if (rp.data && rp.data.length == ro) {
+            document.body.removeChild(fake);
+            return;
+          }
+          fake.style.display = 'none';
+          ro = this.getTotalOffset(rp.parentNode, rp, ro);
+        }
+
+        /*console.log( "offset: " + ro + " parentContainer: " +  rp.nodeName + 
+			" total size: " + (rp.data?rp.data.length:"") + " target: " + ev.target.nodeName + 
+			" parentparent: " + rp.parentNode.nodeName + ' data:'+rp.data); */
+
+        if (tdata.timer) {
+          clearTimeout(tdata.timer);
+          tdata.timer = null;
+        }
+
+        // This is to account for bugs in caretRangeFromPoint
+        // It includes the fact that it returns text nodes over non text nodes
+        // and also the fact that it miss the first character of inline nodes.
+
+        // If the range offset is equal to the node data length
+        // Then we have the second case and need to correct.
+        if (rp.data && ro == rp.data.length) {
+          // A special exception is the WBR tag which is inline but doesn't
+          // contain text.
+          if (rp.nextSibling && rp.nextSibling.nodeName == 'WBR') {
+            rp = rp.nextSibling.nextSibling;
+            ro = 0;
+          }
+          // If we're to the right of an inline character we can use the target.
+          // However, if we're just in a blank spot don't do anything.
+          else if (rcxContent.isInline(ev.target)) {
+            if (rp.parentNode == ev.target);
+            else if (fake && rp.parentNode.innerText == ev.target.value);
+            else {
+              rp = ev.target.firstChild;
+              ro = 0;
+            }
+          }
+          // Otherwise we're on the right and can take the next sibling of the
+          // inline element.
+          else {
+            rp = rp.parentNode.nextSibling;
+            ro = 0;
+          }
+        }
+        // The case where the before div is empty so the false spot is in the parent
+        // But we should be able to take the target.
+        // The 1 seems random but it actually represents the preceding empty tag
+        // also we don't want it to mess up with our fake div
+        // Also, form elements don't seem to fall into this case either.
+        if (
+          !fake &&
+          !('form' in ev.target) &&
+          rp &&
+          rp.parentNode != ev.target &&
+          ro == 1
+        ) {
+          rp = rcxContent.getFirstTextChild(ev.target);
+          ro = 0;
+        }
+
+        // Otherwise, we're off in nowhere land and we should go home.
+        // offset should be 0 or max in this case.
+        else if (!fake && (!rp || rp.parentNode != ev.target)) {
+          rp = null;
+          ro = -1;
+        }
+
+        // For text nodes do special stuff
+        // we make rp the text area and keep the offset the same
+        // we give the text area data so it can act normal
+        if (fake) {
+          rp = ev.target;
+          rp.data = rp.value;
+        }
+
+        //				if (ev.target == tdata.prevTarget && this.isVisible()) {
+        //					//console.log("exit due to same target");
+        //					if (tdata.title) {
+        //						if (fake) document.body.removeChild(fake);
+        //						return;
+        //					}
+        //					if ((rp == tdata.prevRangeNode) && (ro == tdata.prevRangeOfs)) {
+        //						if (fake) document.body.removeChild(fake);
+        //						return;
+        //					}
+        //				}
+
+        if (fake) document.body.removeChild(fake);
+      } catch (err) {
+        console.log(err.message);
+        if (fake) document.body.removeChild(fake);
+        return;
+      }
+
+      /*  		if ((rp) && (rp.nodeType != Node.TEXT_NODE) && !('form' in rp)) {
+		rp = null;
+		ro = -1;
+	}  */
+
+      tdata.prevTarget = ev.target;
+      tdata.prevRangeNode = rp;
+      tdata.prevRangeOfs = ro;
+      tdata.title = null;
+      tdata.uofs = 0;
+      this.uofsNext = 1;
+
+      if (rp && rp.data && ro < rp.data.length) {
+        this.forceKanji = ev.shiftKey ? 1 : 0;
+        tdata.popX = ev.clientX;
+        tdata.popY = ev.clientY;
+        tdata.timer = setTimeout(function() {
+          rcxContent.showAlt(tdata, rcxContent.defaultDict);
+        }, 1);
+        return;
+      }
+
+      if (true /*this.cfg.title*/) {
+        if (typeof ev.target.title == 'string' && ev.target.title.length) {
+          tdata.title = ev.target.title;
+        } else if (typeof ev.target.alt == 'string' && ev.target.alt.length) {
+          tdata.title = ev.target.alt;
+        }
+      }
+
+      // FF3
+      if (ev.target.nodeName == 'OPTION') {
+        tdata.title = ev.target.text;
+      } else if (ev.target.nodeName == 'SELECT') {
+        tdata.title = ev.target.options[ev.target.selectedIndex].text;
+      }
+
+      if (tdata.title) {
+        tdata.popX = ev.clientX;
+        tdata.popY = ev.clientY;
+        tdata.timer = setTimeout(
+          function(tdata) {
+            //rcxContent.showTitle(tdata);
+          },
+          1 /*this.cfg.popdelay*/,
+          tdata
+        );
+      } else {
+        // dont close just because we moved from a valid popup slightly over to a place with nothing
+        var dx = tdata.popX - ev.clientX;
+        var dy = tdata.popY - ev.clientY;
+        var distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance > 4) {
+          this.clearHi();
+          this.hidePopup();
+        }
+      }
+    }
+  },
+
+  onMouseUp: function(ev) {
+    rcxContent._onMouseUp(ev);
+  },
+  _onMouseUp: function(ev) {
+    if (ev.button != 0) return;
+    mDown = false;
+  },
+
+  onKeyUp: function(ev) {
+    if (rcxContent.keysDown[ev.keyCode]) rcxContent.keysDown[ev.keyCode] = 0;
+  },
+
+  unicodeInfo: function(c) {
+    hex = '0123456789ABCDEF';
+    u = c.charCodeAt(0);
+    return (
+      c +
+      ' U' +
+      hex[(u >>> 12) & 15] +
+      hex[(u >>> 8) & 15] +
+      hex[(u >>> 4) & 15] +
+      hex[u & 15]
+    );
+  },
+
+  kanjiN: 1,
+  namesN: 2,
+
+  inlineNames: {
+    // text node
+    '#text': true,
+
+    // font style
+    FONT: true,
+    TT: true,
+    I: true,
+    B: true,
+    BIG: true,
+    SMALL: true,
+    //deprecated
+    STRIKE: true,
+    S: true,
+    U: true,
+
+    // phrase
+    EM: true,
+    STRONG: true,
+    DFN: true,
+    CODE: true,
+    SAMP: true,
+    KBD: true,
+    VAR: true,
+    CITE: true,
+    ABBR: true,
+    ACRONYM: true,
+
+    // special, not included IMG, OBJECT, BR, SCRIPT, MAP, BDO
+    A: true,
+    Q: true,
+    SUB: true,
+    SUP: true,
+    SPAN: true,
+    WBR: true,
+
+    // ruby
+    RUBY: true,
+    RBC: true,
+    RTC: true,
+    RB: true,
+    RT: true,
+    RP: true
+  },
+
+  isInline: function(node) {
+    return (
+      this.inlineNames.hasOwnProperty(node.nodeName) ||
+      (document.defaultView.getComputedStyle(node, null) &&
+        (document.defaultView
+          .getComputedStyle(node, null)
+          .getPropertyValue('display') == 'inline' ||
+          document.defaultView
+            .getComputedStyle(node, null)
+            .getPropertyValue('display') == 'inline-block'))
+    );
+  },
+
+  // XPath expression which evaluates to text nodes
+  // tells naver_dic which text to translate
+  // expression to get all text nodes that are not in (RP or RT) elements
+  textNodeExpr:
+    'descendant-or-self::text()[not(parent::rp) and not(ancestor::rt)]',
+
+  // XPath expression which evaluates to a boolean. If it evaluates to true
+  // then naver_dic will not start looking for text in this text node
+  // ignore text in RT elements
+  startElementExpr: 'boolean(parent::rp or ancestor::rt)',
+
+  // Gets text from a node
+  // returns a string
+  // node: a node
+  // selEnd: the selection end object will be changed as a side effect
+  // maxLength: the maximum length of returned string
+  // xpathExpr: an XPath expression, which evaluates to text nodes, will be evaluated
+  // relative to "node" argument
+  getInlineText: function(node, selEndList, maxLength, xpathExpr) {
+    var text = '';
+    var endIndex;
+
+    if (node.nodeName == '#text') {
+      endIndex = Math.min(maxLength, node.data.length);
+      selEndList.push({
+        node: node,
+        offset: endIndex
+      });
+      return node.data.substring(0, endIndex);
+    }
+
+    var result = xpathExpr.evaluate(
+      node,
+      XPathResult.ORDERED_NODE_ITERATOR_TYPE,
+      null
+    );
+
+    while (text.length < maxLength && (node = result.iterateNext())) {
+      endIndex = Math.min(node.data.length, maxLength - text.length);
+      text += node.data.substring(0, endIndex);
+      selEndList.push({
+        node: node,
+        offset: endIndex
+      });
+    }
+
+    return text;
+  },
+
+  getInlinePreviousText: function(node, selEndList, maxLength, xpathExpr) {
+    var text = '';
+    var sublength;
+    var endIndex;
+
+    if (node.nodeName == '#text') {
+      sublength = Math.min(maxLength, node.data.length);
+      endIndex = node.data.length - sublength;
+      selEndList.push({
+        node: node,
+        offset: endIndex
+      });
+      return node.data.substring(endIndex, node.data.length);
+    }
+
+    var result = xpathExpr.evaluate(
+      node,
+      XPathResult.ORDERED_NODE_ITERATOR_TYPE,
+      null
+    );
+
+    nodes = [];
+    while ((node = result.iterateNext())) {
+      nodes.splice(0, 0, node);
+    }
+
+    for (var i = 0; i < nodes.length; i++) {
+      if (text.length < maxLength) {
+        sublength = Math.min(nodes[i].data.length, maxLength - text.length);
+        endIndex = nodes[i].data.length - sublength;
+        text = nodes[i].data.substring(endIndex, nodes[i].data.length) + text;
+        selEndList.push({
+          node: nodes[i],
+          offset: endIndex
+        });
+      }
+    }
+
+    return text;
+  },
+
+  // given a node which must not be null,
+  // returns either the next sibling or next sibling of the father or
+  // next sibling of the fathers father and so on or null
+  getNext: function(node) {
+    var nextNode;
+
+    if ((nextNode = node.nextSibling) != null) return nextNode;
+    if ((nextNode = node.parentNode) != null && this.isInline(nextNode))
+      return this.getNext(nextNode);
+
+    return null;
+  },
+
+  getPrevious: function(node) {
+    var previousNode;
+    if ((previousNode = node.previousSibling) != null) return previousNode;
+    if ((previousNode = node.parentNode) != null && this.isInline(previousNode))
+      return this.getPrevious(previousNode);
+
+    return null;
+  },
+
+  getTextFromRange: function(rangeParent, offset, selEndList, maxLength) {
+    if (rangeParent.nodeName == 'TEXTAREA' || rangeParent.nodeName == 'INPUT') {
+      var endIndex = Math.min(rangeParent.data.length, offset + maxLength);
+      return rangeParent.value.substring(offset, endIndex);
+    }
+
+    var text = '';
+
+    var endIndex;
+
+    var xpathExpr = rangeParent.ownerDocument.createExpression(
+      this.textNodeExpr,
+      null
+    );
+
+    if (
+      rangeParent.ownerDocument.evaluate(
+        this.startElementExpr,
+        rangeParent,
+        null,
+        XPathResult.BOOLEAN_TYPE,
+        null
+      ).booleanValue
+    )
+      return '';
+
+    if (rangeParent.nodeType != Node.TEXT_NODE) return '';
+
+    endIndex = Math.min(rangeParent.data.length, offset + maxLength);
+    text += rangeParent.data.substring(offset, endIndex);
+    selEndList.push({
+      node: rangeParent,
+      offset: endIndex
+    });
+
+    ///////////////////////custom//////////////////////
+    var previousText = '';
+    startIndex = offset <= maxLength ? 0 : offset - maxLength;
+    previousText =
+      rangeParent.data.substring(startIndex, offset) + previousText;
+
+    ///////////////////////custom//////////////////////
+
+    var nextNode = rangeParent;
+    var previousNode = rangeParent;
+    while (
+      (nextNode = this.getNext(nextNode)) != null &&
+      this.isInline(nextNode) &&
+      text.length < maxLength
+    )
+      text += this.getInlineText(
+        nextNode,
+        selEndList,
+        maxLength - text.length,
+        xpathExpr
+      );
+
+    ///////////////////////custom//////////////////////
+    while (
+      (previousNode = this.getPrevious(previousNode)) != null &&
+      this.isInline(previousNode) &&
+      previousText.length < maxLength
+    )
+      previousText =
+        this.getInlinePreviousText(
+          previousNode,
+          selEndList,
+          maxLength - previousText.length,
+          xpathExpr
+        ) + previousText;
+    ///////////////////////custom//////////////////////
+
+    return {
+      previous: previousText,
+      text: text
+    };
+  },
+
+  // Hack because SelEnd can't be sent in messages
+  lastSelEnd: [],
+  // Hack because ro was coming out always 0 for some reason.
+  lastRo: 0,
+
+  show: function(tdata, dictOption) {
+    var rp = tdata.prevRangeNode;
+    var ro = tdata.prevRangeOfs + tdata.uofs;
+    var u;
+
+    tdata.uofsNext = 1;
+
+    if (!rp) {
+      this.clearHi();
+      this.hidePopup();
+      return 0;
+    }
+
+    if (ro < 0 || ro >= rp.data.length) {
+      this.clearHi();
+      this.hidePopup();
+      return 0;
+    }
+
+    // if we have '   XYZ', where whitespace is compressed, X never seems to get selected
+    while ((u = rp.data.charCodeAt(ro)) == 32 || u == 9 || u == 10) {
+      ++ro;
+      if (ro >= rp.data.length) {
+        this.clearHi();
+        this.hidePopup();
+        return 0;
+      }
+    }
+
+    var language = this.getLanguageType(u);
+
+    //console.log(u + " " + language);
+    if (isNaN(u) || language == -1) {
+      this.clearHi();
+      this.hidePopup();
+      return -2;
+    }
+
+    //selection end data
+    var selEndList = [];
+
+    var text = this.getTextFromRange(rp, ro, selEndList, 13 /*maxlength*/);
+    var checkLanguage;
+    if (rcxContent.autoSelect) {
+      checkLanguage = this.checkLanguage(
+        text.previous + text.text,
+        text.previous.length
+      );
+    } else {
+      //not autoselect. use the language in setting
+      checkLanguage = this.checkLanguage(
+        text.previous + text.text,
+        text.previous.length
+      );
+    }
+
+    lastSelEnd = selEndList;
+    lastRo = ro;
+
+    var dic_query_param = {
+      wordString: checkLanguage.text,
+      languageCode: checkLanguage.languageCode,
+      nlp: true,
+      mousePoint: checkLanguage.offset
+    };
+
+    window.transferlanguage = checkLanguage.languageCode;
+    var url = dic_query_url + $.param(dic_query_param);
+    console.log(url);
+    $.get(url, rcxContent.dicCallback);
+
+    return 1;
+  },
+
+  showAlt: function(tdata, dictOption) {
+    var rp = tdata.prevRangeNode;
+    var ro = tdata.prevRangeOfs + tdata.uofs;
+    var u;
+
+    tdata.uofsNext = 1;
+
+    if (!rp) {
+      this.clearHi();
+      this.hidePopup();
+      return 0;
+    }
+
+    if (ro < 0 || ro >= rp.data.length) {
+      this.clearHi();
+      this.hidePopup();
+      return 0;
+    }
+
+    // if we have '   XYZ', where whitespace is compressed, X never seems to get selected
+    while ((u = rp.data.charCodeAt(ro)) == 32 || u == 9 || u == 10) {
+      ++ro;
+      if (ro >= rp.data.length) {
+        this.clearHi();
+        this.hidePopup();
+        return 0;
+      }
+    }
+
+    var language = this.getLanguageType(u);
+
+    //console.log(u + " " + language);
+    /*if (isNaN(u) || language == -1) {
+			this.clearHi();
+			this.hidePopup();
+			return -2;
+		}*/
+
+    //selection end data
+    var selEndList = [];
+
+    var text = this.getTextFromRange(rp, ro, selEndList, 13 /*maxlength*/);
+    var checkLanguage;
+    if (rcxContent.autoSelect) {
+      checkLanguage = this.checkSingleWordLanguage(
+        text.previous + text.text,
+        text.previous.length
+      );
+    } else {
+      //not autoselect. use the language in setting
+      checkLanguage = this.checkSingleWordLanguage(
+        text.previous + text.text,
+        text.previous.length
+      );
+    }
+
+    lastSelEnd = selEndList;
+    lastRo = ro;
+
+    var url = '';
+    if (rcxContent.autoSelect) {
+      if (checkLanguage.languageCode == dictType.Chinese) {
+        url =
+          'https://zh.dict.naver.com/mini/search/all?q=' + checkLanguage.text;
+      } else if (checkLanguage.languageCode == dictType.Japanese) {
+        url =
+          'https://ja.dict.naver.com/search.nhn?m=mini&query=' +
+          checkLanguage.text;
+      } else if (checkLanguage.languageCode == dictType.English) {
+        url =
+          'https://endic.naver.com/popManager.nhn?sLn=kr&m=search&query=' +
+          checkLanguage.text;
+      } else {
+        return;
+      }
+    } else {
+      switch (rcxContent.defaultDict) {
+        case 0:
+          url =
+            'https://endic.naver.com/popManager.nhn?sLn=kr&m=search&query=' +
+            checkLanguage.text;
+          break;
+        case 1:
+          url =
+            'https://ko.dict.naver.com/small_search.nhn?query=' +
+            checkLanguage.text;
+          break;
+        case 2:
+          url =
+            'https://hanja.dict.naver.com/small/search?query=' +
+            checkLanguage.text;
+          break;
+        case 3:
+          url =
+            'https://ja.dict.naver.com/search.nhn?m=mini&query=' +
+            checkLanguage.text;
+          break;
+        case 4:
+          url =
+            'https://zh.dict.naver.com/mini/search/all?q=' + checkLanguage.text;
+          break;
+        case 5:
+          url =
+            'https://dict.naver.com/frkodict/mini/search_mini.nhn?query=' +
+            checkLanguage.text;
+          break;
+        default:
+          return;
+      }
+    }
+
+    var width = 420;
+    var height = 550;
+    wholeWidth = screen.availLeft + screen.availWidth;
+    wholeHeight = screen.availTop + screen.availHeight;
+    windowRight = wholeWidth - window.top.screenX - window.top.outerWidth;
+    var extendheight = window.top.outerHeight - window.top.innerHeight;
+    var top = window.top.screenY + extendheight;
+    var left = wholeWidth - windowRight - width;
+
+    chrome.extension.sendMessage({
+      dictRequestType: dictRequestType.showWindow,
+      url: url,
+      width: width,
+      height: height,
+      top: top,
+      left: left
+    });
+  },
+
+  checkSingleWordLanguage: function(text, mousePoint) {
+    var u = text.charCodeAt(mousePoint);
+    if (this.getLanguageType(u) == dictType.English) {
+      pre = '';
+      body = '';
+      for (var i = mousePoint; i < text.length; i++) {
+        if (this.getLanguageType(text[i].charCodeAt(0)) == dictType.English) {
+          body += text[i];
+        } else {
+          break;
+        }
+      }
+
+      if (mousePoint > 0) {
+        for (var i = mousePoint - 1; i >= 0; i--) {
+          if (this.getLanguageType(text[i].charCodeAt(0)) == dictType.English) {
+            pre = text[i] + pre;
+          } else {
+            break;
+          }
+        }
+      }
+
+      return {
+        languageCode: dictType.English,
+        text: (pre + body).toLowerCase(),
+        offset: pre.length
+      };
+    }
+
+    //i don't know why to split numbers...
+    if (u >= 48 && u <= 57) {
+      pre = '';
+      body = '';
+      for (var i = mousePoint; i < text.length; i++) {
+        if (text[i].charCodeAt(0) >= 48 && text[i].charCodeAt(0) <= 57) {
+          body += text[i];
+        } else {
+          break;
+        }
+      }
+
+      if (mousePoint > 0) {
+        for (var i = mousePoint - 1; i >= 0; i--) {
+          if (text[i].charCodeAt(0) >= 48 && text[i].charCodeAt(0) <= 57) {
+            pre = text[i] + pre;
+          } else {
+            break;
+          }
+        }
+      }
+
+      return {
+        languageCode: dictType.Chinese,
+        text: (pre + body).toLowerCase(),
+        offset: pre.length
+      };
+    }
+
+    return {
+      languageCode: this.getLanguageType(u),
+      text: String.fromCharCode(u),
+      offset: mousePoint
+    };
+  },
+
+  checkLanguage: function(text, mousePoint) {
+    var u = text.charCodeAt(mousePoint);
+    if (this.getLanguageType(u) == dictType.English) {
+      pre = '';
+      body = '';
+      for (var i = mousePoint; i < text.length; i++) {
+        if (this.getLanguageType(text[i].charCodeAt(0)) == dictType.English) {
+          body += text[i];
+        } else {
+          break;
+        }
+      }
+
+      if (mousePoint > 0) {
+        for (var i = mousePoint - 1; i >= 0; i--) {
+          if (this.getLanguageType(text[i].charCodeAt(0)) == dictType.English) {
+            pre = text[i] + pre;
+          } else {
+            break;
+          }
+        }
+      }
+
+      return {
+        languageCode: dictType.English,
+        text: (pre + body).toLowerCase(),
+        offset: pre.length
+      };
+    }
+
+    var charset = document.charset.toLowerCase();
+    if (charset == 'euc-jp' || charset == 'shift_jis') {
+      return {
+        languageCode: dictType.Japanese,
+        text: text,
+        offset: mousePoint
+      };
+    } else if (
+      charset == 'gb18030' ||
+      charset == 'hz-gb-2312' ||
+      charset == 'gb2312'
+    ) {
+      return {
+        languageCode: dictType.Chinese,
+        text: text,
+        offset: mousePoint
+      };
+    } else if (charset == 'utf-8') {
+      if (this.getLanguageType(u) == dictType.Japanese) {
+        return {
+          languageCode: dictType.Japanese,
+          text: text,
+          offset: mousePoint
+        };
+      } else {
+        for (var i = 0; i < text.length; i++) {
+          if (
+            this.getLanguageType(text[i].charCodeAt(0)) == dictType.Japanese
+          ) {
+            return {
+              languageCode: dictType.Japanese,
+              text: text,
+              offset: mousePoint
+            };
+          }
+        }
+
+        return {
+          languageCode: this.getLanguageType(u),
+          text: text,
+          offset: mousePoint
+        };
+      }
+    } else {
+      return {
+        languageCode: this.getLanguageType(u),
+        text: text,
+        offset: mousePoint
+      };
+    }
+  },
+
+  dicCallback: function(data) {
+    // request result log
+    //console.log('result:', data);
+    entry = JSON.parse(data);
+    if (entry && entry.entryName) {
+      entry.matchLen = entry.entryName.length;
+      rcxContent.processEntry(entry);
+    } else {
+      rcxContent.processEntry(null);
+    }
+  },
+
+  processEntry: function(e) {
+    tdata = window.naver_dic;
+    tdata.config = {};
+    tdata.config.highlight = 'false';
+    tdata.config.textboxhl = 'true';
+
+    ro = lastRo;
+    selEndList = lastSelEnd;
+
+    if (!e) {
+      rcxContent.hidePopup();
+      rcxContent.clearHi();
+      return -1;
+    }
+    rcxContent.lastFound = [e];
+
+    if (!e.matchLen) e.matchLen = 1;
+    tdata.uofsNext = e.matchLen;
+    tdata.uofs = ro - tdata.prevRangeOfs;
+
+    rp = tdata.prevRangeNode;
+    // don't try to highlight form elements
+    if (
+      rp &&
+      ((tdata.config.highlight == 'true' &&
+        !this.mDown &&
+        !('form' in tdata.prevTarget)) ||
+        ('form' in tdata.prevTarget && tdata.config.textboxhl == 'true'))
+    ) {
+      var doc = rp.ownerDocument;
+      if (!doc) {
+        rcxContent.clearHi();
+        rcxContent.hidePopup();
+        return 0;
+      }
+      rcxContent.highlightMatch(doc, rp, ro, e.matchLen, selEndList, tdata);
+      tdata.prevSelView = doc.defaultView;
+    }
+
+    /*chrome.extension.sendMessage({
+			"type": "makehtml",
+			"entry": e
+		}, rcxContent.processHtml);*/
+
+    /*window.postMessage({
+			type: "FROM_CONTENTSCRIPT",
+			data: {}
+		}, '*');*/
+
+    window.transferdata = e;
+    window.pronundata = null;
+
+    html = rcxContent.makeHtml(e);
+    rcxContent.processHtml(html);
+  },
+
+  makeHtml: function(entry) {
+    html = '';
+    html += '<div class="inner-window">';
+    if (
+      (entry.pronunFile && entry.pronunFile.length) ||
+      (entry.pronunciation && entry.pronunciation.length)
+    ) {
+      html +=
+        '<a href="javascript:;" class="pronun_button"><img class="pronun-pic" alt="" src="' +
+        chrome.extension.getURL('img/pronun.png') +
+        '" /></a>';
+    }
+
+    html += '<a href="javascript:;" class="entry-name">';
+
+    if (entry.hanja) {
+      html += entry.entryName + '(' + entry.hanja + ')';
+    } else {
+      html += entry.entryName;
+    }
+
+    html += '</a>';
+
+    if (entry.pronunSymbol && entry.pronunSymbol.length) {
+      html += '[';
+
+      for (var i = 0; i < entry.pronunSymbol.length; i++) {
+        html += entry.pronunSymbol[i].trim() + ',';
+      }
+
+      html = html.substring(0, html.length - 1);
+      html += ']';
+    } else if (entry.pinyin && entry.pinyin.length) {
+      html += '[';
+
+      for (var i = 0; i < entry.pinyin.length; i++) {
+        html += entry.pinyin[i].trim() + ',';
+      }
+
+      html = html.substring(0, html.length - 1);
+      html += ']';
+    }
+
+    if (entry.mean && entry.mean.length) {
+      html += '<p class="dic_descript">';
+      for (var i = 0; i < entry.mean.length; i++) {
+        html += entry.mean[i] + ',';
+      }
+      html = html.substring(0, html.length - 1);
+      html += '</p>';
+    }
+
+    html +=
+      '<a href="javascript:;" class="naver_copy_button">복사</a>' + '</div>';
+    return html;
+  },
+
+  processHtml: function(html) {
+    tdata = window.naver_dic;
+    rcxContent.showPopup(html, tdata.prevTarget, tdata.popX, tdata.popY, false);
+
+    if ($('a.entry-name')) {
+      //console.log("addEventListener to entry-name succ.");
+      $('a.entry-name').click(function() {
+        window.postMessage(
+          {
+            type: 'FROM_PAGE',
+            method: 'open'
+          },
+          '*'
+        );
+      });
+    } else {
+      console.log('addEventListener to entry-name failed.');
+    }
+
+    if ($('a.naver_copy_button')) {
+      //console.log("addEventListener to entry-name succ.");
+      $('a.naver_copy_button').click(function() {
+        window.postMessage(
+          {
+            type: 'FROM_PAGE',
+            method: 'copy'
+          },
+          '*'
+        );
+      });
+    } else {
+      console.log('addEventListener to naver_copy_button failed.');
+    }
+
+    if ($('a.pronun_button')) {
+      //console.log("addEventListener to entry-name succ.");
+      $('a.pronun_button').click(function() {
+        window.postMessage(
+          {
+            type: 'FROM_PAGE',
+            method: 'pronun'
+          },
+          '*'
+        );
+      });
+    } else {
+      console.log('addEventListener to pronun_button failed.');
+    }
+
+    return 1;
+  },
+
+  getLanguageType: function(ch) {
+    if ((ch >= 0x0041 && ch <= 0x005a) || (ch >= 0x0061 && ch <= 0x007a)) {
+      return dictType.English;
+    } else if (
+      (ch >= 11904 && ch <= 11929) ||
+      (ch >= 11931 && ch <= 12019) ||
+      (ch >= 12032 && ch <= 12245) ||
+      (ch >= 12549 && ch <= 12588) ||
+      (ch >= 12704 && ch <= 12727) ||
+      (ch >= 13312 && ch <= 19893) ||
+      (ch >= 19968 && ch <= 40869) ||
+      (ch >= 63744 && ch <= 64045)
+    ) {
+      return dictType.Chinese;
+    } else if (
+      (ch >= 12353 && ch <= 12438) ||
+      (ch >= 12441 && ch <= 12447) ||
+      (ch >= 12449 && ch <= 12543)
+    ) {
+      return dictType.Japanese;
+    }
+
+    return -1;
+  },
+
+  highlightMatch: function(doc, rp, ro, matchLen, selEndList, tdata) {
+    var sel = doc.defaultView.getSelection();
+
+    // If selEndList is empty then we're dealing with a textarea/input situation
+    if (selEndList.length === 0) {
+      try {
+        if (rp.nodeName == 'TEXTAREA' || rp.nodeName == 'INPUT') {
+          // If there is already a selected region not caused by
+          // rikaikun, leave it alone
+          if (sel.toString() && tdata.selText != sel.toString()) return;
+
+          // If there is no selected region and the saved
+          // textbox is the same as teh current one
+          // then save the current cursor position
+          // The second half of the condition let's us place the
+          // cursor in another text box without having it jump back
+          if (!sel.toString() && tdata.oldTA == rp) {
+            tdata.oldCaret = rp.selectionStart;
+            tdata.oldTA = rp;
+          }
+          rp.selectionStart = ro;
+          rp.selectionEnd = matchLen + ro;
+
+          tdata.selText = rp.value.substring(ro, matchLen + ro);
+        }
+      } catch (err) {
+        // If there is an error it is probably caused by the input type
+        // being not text.  This is the most general way to deal with
+        // arbitrary types.
+
+        // we set oldTA to null because we don't want to do weird stuf
+        // with buttons
+        tdata.oldTA = null;
+        //console.log("invalid input type for selection:" + rp.type);
+        console.log(err.message);
+      }
+      return;
+    }
+
+    // Special case for leaving a text box to an outside japanese
+    // Even if we're not currently in a text area we should save
+    // the last one we were in.
+    if (tdata.oldTA && !sel.toString() && tdata.oldCaret >= 0)
+      tdata.oldCaret = tdata.oldTA.selectionStart;
+
+    var selEnd;
+    var offset = matchLen + ro;
+
+    for (var i = 0, len = selEndList.length; i < len; i++) {
+      selEnd = selEndList[i];
+      if (offset <= selEnd.offset) break;
+      offset -= selEnd.offset;
+    }
+
+    var range = doc.createRange();
+    range.setStart(rp, ro);
+    range.setEnd(selEnd.node, offset);
+
+    if (sel.toString() && tdata.selText != sel.toString()) return;
+    sel.removeAllRanges();
+    sel.addRange(range);
+    tdata.selText = sel.toString();
+  },
+
+  showTitle: function(tdata) {
+    chrome.extension.sendMessage(
+      {
+        type: 'translate',
+        title: tdata.title
+      },
+      rcxContent.processTitle
+    );
+  },
+
+  processTitle: function(e) {
+    tdata = window.naver_dic;
+
+    if (!e) {
+      rcxContent.hidePopup();
+      return;
+    }
+
+    e.title = tdata.title
+      .substr(0, e.textLen)
+      .replace(/[\x00-\xff]/g, function(c) {
+        return '&#' + c.charCodeAt(0) + ';';
+      });
+    if (tdata.title.length > e.textLen) e.title += '...';
+
+    this.lastFound = [e];
+
+    chrome.extension.sendMessage(
+      {
+        type: 'makehtml',
+        entry: e
+      },
+      rcxContent.processHtml
+    );
+  },
+  /*
+	inRange: function (event) {
+		var selection = event.view.getSelection();
+		if ((selection.rangeCount === 0) || (!event.rangeParent)) return false;
+		var newRange = event.view.document.createRange();
+		newRange.setStart(event.rangeParent, event.rangeOffset);
+		newRange.setEnd(event.rangeParent, event.rangeOffset);
+
+		var curRange = selection.getRangeAt(0);
+		if (newRange.compareBoundaryPoints(Range.START_TO_START, curRange) > -1 &&
+			newRange.compareBoundaryPoints(Range.END_TO_END, curRange) < 0)
+			return true;
+		else return false;
+	},
+
+*/
+  getFirstTextChild: function(node) {
+    return document
+      .evaluate(
+        'descendant::text()[not(parent::rp) and not(ancestor::rt)]',
+        node,
+        null,
+        XPathResult.ANY_TYPE,
+        null
+      )
+      .iterateNext();
+    //
+  },
+
+  makeFake: function(real) {
+    var fake = document.createElement('div');
+    fake.innerText = real.value;
+    fake.style.cssText = document.defaultView.getComputedStyle(
+      real,
+      ''
+    ).cssText;
+    fake.scrollTop = real.scrollTop;
+    fake.scrollLeft = real.scrollLeft;
+    fake.style.position = 'absolute';
+    fake.style.zIndex = 7777;
+    $(fake).offset({
+      top: $(real).offset().top,
+      left: $(real).offset().left
+    });
+
+    return fake;
+  },
+
+  getTotalOffset: function(parent, tNode, offset) {
+    var fChild = parent.firstChild;
+    var realO = offset;
+    if (fChild == tNode) return offset;
+    do {
+      var val = 0;
+      if (fChild.nodeName == 'BR') {
+        val = 1;
+      } else {
+        val = fChild.data ? fChild.data.length : 0;
+      }
+      realO += val;
+    } while ((fChild = fChild.nextSibling) != tNode);
+
+    return realO;
+  },
+
+  onMouseMove: function(ev) {
+    var tdata = window.naver_dic;
+    if (tdata.delayTimer) {
+      clearTimeout(tdata.delayTimer);
+      if (tdata.lastPosition) {
+        cnode = ev.target;
+        while (cnode.id != 'naver_dic-window' && cnode.parentNode) {
+          cnode = cnode.parentNode;
+        }
+
+        if (cnode.id == 'naver_dic-window') {
+          return;
+        }
+
+        var dx = tdata.lastPosition.x - ev.clientX;
+        var dy = tdata.lastPosition.y - ev.clientY;
+        var distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance > 100) {
+          tdata.lastPosition = null;
+          rcxContent.clearHi();
+          rcxContent.hidePopup();
+        }
+      }
+    }
+
+    tdata.delayTimer = setTimeout(function() {
+      clearTimeout(tdata.delayTimer);
+      tdata.delayTimer = null;
+      rcxContent._onMouseMove(ev);
+      tdata.lastPosition = {
+        x: ev.clientX,
+        y: ev.clientY
+      };
+    }, 200);
+  },
+
+  _onMouseMove: function(ev) {
+    var fake;
+    // Put this in a try catch so that an exception here doesn't prevent editing due to div.
+    try {
+      //don't hide popup when hover the pop window
+      cnode = ev.target;
+      while (cnode.id != 'naver_dic-window' && cnode.parentNode) {
+        cnode = cnode.parentNode;
+      }
+
+      if (cnode.id == 'naver_dic-window') {
+        return;
+      }
+
+      if (ev.target.nodeName == 'TEXTAREA' || ev.target.nodeName == 'INPUT') {
+        fake = rcxContent.makeFake(ev.target);
+        document.body.appendChild(fake);
+        fake.scrollTop = ev.target.scrollTop;
+        fake.scrollLeft = ev.target.scrollLeft;
+      }
+
+      var tdata = window.naver_dic; // per-tab data
+
+      var range = document.caretRangeFromPoint(ev.clientX, ev.clientY);
+      var rp = range.startContainer;
+      var ro = range.startOffset;
+
+      if (fake) {
+        // At the end of a line, don't do anything or you just get beginning of next line
+        if (rp.data && rp.data.length == ro) {
+          document.body.removeChild(fake);
+          return;
+        }
+        fake.style.display = 'none';
+        ro = this.getTotalOffset(rp.parentNode, rp, ro);
+      }
+
+      /*console.log( "offset: " + ro + " parentContainer: " +  rp.nodeName + 
+				" total size: " + (rp.data?rp.data.length:"") + " target: " + ev.target.nodeName + 
+				" parentparent: " + rp.parentNode.nodeName + ' data:'+rp.data); */
+
+      if (tdata.timer) {
+        clearTimeout(tdata.timer);
+        tdata.timer = null;
+      }
+
+      // This is to account for bugs in caretRangeFromPoint
+      // It includes the fact that it returns text nodes over non text nodes
+      // and also the fact that it miss the first character of inline nodes.
+
+      // If the range offset is equal to the node data length
+      // Then we have the second case and need to correct.
+      if (rp.data && ro == rp.data.length) {
+        // A special exception is the WBR tag which is inline but doesn't
+        // contain text.
+        if (rp.nextSibling && rp.nextSibling.nodeName == 'WBR') {
+          rp = rp.nextSibling.nextSibling;
+          ro = 0;
+        }
+        // If we're to the right of an inline character we can use the target.
+        // However, if we're just in a blank spot don't do anything.
+        else if (rcxContent.isInline(ev.target)) {
+          if (rp.parentNode == ev.target);
+          else if (fake && rp.parentNode.innerText == ev.target.value);
+          else {
+            rp = ev.target.firstChild;
+            ro = 0;
+          }
+        }
+        // Otherwise we're on the right and can take the next sibling of the
+        // inline element.
+        else {
+          rp = rp.parentNode.nextSibling;
+          ro = 0;
+        }
+      }
+      // The case where the before div is empty so the false spot is in the parent
+      // But we should be able to take the target.
+      // The 1 seems random but it actually represents the preceding empty tag
+      // also we don't want it to mess up with our fake div
+      // Also, form elements don't seem to fall into this case either.
+      if (
+        !fake &&
+        !('form' in ev.target) &&
+        rp &&
+        rp.parentNode != ev.target &&
+        ro == 1
+      ) {
+        rp = rcxContent.getFirstTextChild(ev.target);
+        ro = 0;
+      }
+
+      // Otherwise, we're off in nowhere land and we should go home.
+      // offset should be 0 or max in this case.
+      else if (!fake && (!rp || rp.parentNode != ev.target)) {
+        rp = null;
+        ro = -1;
+      }
+
+      // For text nodes do special stuff
+      // we make rp the text area and keep the offset the same
+      // we give the text area data so it can act normal
+      if (fake) {
+        rp = ev.target;
+        rp.data = rp.value;
+      }
+
+      if (ev.target == tdata.prevTarget && this.isVisible()) {
+        //console.log("exit due to same target");
+        if (tdata.title) {
+          if (fake) document.body.removeChild(fake);
+          return;
+        }
+        if (rp == tdata.prevRangeNode && ro == tdata.prevRangeOfs) {
+          if (fake) document.body.removeChild(fake);
+          return;
+        }
+      }
+
+      if (fake) document.body.removeChild(fake);
+    } catch (err) {
+      console.log(err.message);
+      if (fake) document.body.removeChild(fake);
+      return;
+    }
+
+    /*  		if ((rp) && (rp.nodeType != Node.TEXT_NODE) && !('form' in rp)) {
+			rp = null;
+			ro = -1;
+		}  */
+
+    tdata.prevTarget = ev.target;
+    tdata.prevRangeNode = rp;
+    tdata.prevRangeOfs = ro;
+    tdata.title = null;
+    tdata.uofs = 0;
+    this.uofsNext = 1;
+
+    if (rp && rp.data && ro < rp.data.length) {
+      this.forceKanji = ev.shiftKey ? 1 : 0;
+      tdata.popX = ev.clientX;
+      tdata.popY = ev.clientY;
+      tdata.timer = setTimeout(function() {
+        rcxContent.show(tdata, rcxContent.defaultDict);
+      }, 1);
+      return;
+    }
+
+    if (true /*this.cfg.title*/) {
+      if (typeof ev.target.title == 'string' && ev.target.title.length) {
+        tdata.title = ev.target.title;
+      } else if (typeof ev.target.alt == 'string' && ev.target.alt.length) {
+        tdata.title = ev.target.alt;
+      }
+    }
+
+    // FF3
+    if (ev.target.nodeName == 'OPTION') {
+      tdata.title = ev.target.text;
+    } else if (ev.target.nodeName == 'SELECT') {
+      tdata.title = ev.target.options[ev.target.selectedIndex].text;
+    }
+
+    if (tdata.title) {
+      tdata.popX = ev.clientX;
+      tdata.popY = ev.clientY;
+      tdata.timer = setTimeout(
+        function(tdata) {
+          rcxContent.showTitle(tdata);
+        },
+        1 /*this.cfg.popdelay*/,
+        tdata
+      );
+    } else {
+      // dont close just because we moved from a valid popup slightly over to a place with nothing
+      var dx = tdata.popX - ev.clientX;
+      var dy = tdata.popY - ev.clientY;
+      var distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance > 4) {
+        this.clearHi();
+        this.hidePopup();
+      }
+    }
+  }
+};
+
+//Event Listeners
+chrome.runtime.onMessage.addListener(function(request, sender, sendResponse) {
+  switch (request.dictRequestType) {
+    case dictRequestType.enable:
+      rcxContent.enableTab();
+      console.log('enable');
+      break;
+    case dictRequestType.disable:
+      rcxContent.disableTab();
+      console.log('disable');
+      break;
+    case dictRequestType.autoselect:
+      console.log(
+        'naver dic autoselect enable is ' +
+          request.autoselect +
+          ', defaultdict is ' +
+          request.defaultdict
+      );
+      rcxContent.setAutoSelect(request.autoselect, request.defaultdict);
+      break;
+    case dictRequestType.showPopup:
+      rcxContent.onShowPopByRightMenu(request.text, request.defaultDict);
+      console.log('showPopup');
+      break;
+    default:
+    //console.log(request);
+  }
+});
+
+// When a page first loads,initial.
+chrome.extension.sendMessage({
+  dictRequestType: dictRequestType.initial
+});
